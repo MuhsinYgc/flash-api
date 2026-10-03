@@ -1,10 +1,12 @@
 # flash-api
 
-Next.js API and show clock server for the flash frontend (`../flah-web`).
+Show sync server for the flash frontend (`../flah-web`). Distributes timeline cues and clock sync over WebSocket and HTTP.
 
 ```bash
-npm run dev:all
+npm run dev
 ```
 
-API: http://localhost:3201  
-Show sync: ws://localhost:3202 and HTTP `/snapshot`, `/command`.
+- WebSocket: ws://localhost:3202
+- HTTP: http://localhost:3202/snapshot, /command, etc.
+
+The frontend proxies `/show-http/*` to this server.

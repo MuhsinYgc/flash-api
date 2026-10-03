@@ -1,7 +1,7 @@
-# flask-web-api — agent notes
+# flash-api — agent notes
 
-Next.js API. Sibling frontend is `../flah-web`.
+Show sync server for sibling frontend `../flah-web`.
 
-Run this first: `npm run dev` (port 3201). Frontend proxies `/api/*` here.
+Run: `npm run dev` (port 3202). Frontend starts this via `npm run dev:api` in the web project.
 
-Prefer reading existing patterns before changing code. Run `npm run lint` and `npm run build` before merging substantial changes.
+Prefer reading existing patterns before changing code.
