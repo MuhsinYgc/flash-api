@@ -1,11 +1,15 @@
+import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
+import { fetchYouTubeTitle, isVideoId, loadYouTubeAudio } from "./youtube-audio.mjs";
 
 const PORT = Number(process.env.SHOW_WS_PORT ?? 3202);
 const MIN_FLASH_GAP_MS = 334;
 const PLAY_LEAD_MS = 420;
 const FLASH_LEAD_MS = 280;
 const DEFAULT_ROOM = "main";
+const MAX_TRACK_MS = 3 * 60 * 60 * 1000;
+const MAX_COMMAND_BYTES = 1_500_000;
 
 /** @typedef {"beat" | "pulse" | "hold" | "timeline"} Pattern */
 /** @typedef {{ atMs: number, onMs: number, color?: string }} TimelineCue */
@@ -42,6 +46,12 @@ function clampBpm(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 120;
   return Math.min(170, Math.max(60, Math.round(n)));
+}
+
+function clampAnchor(value, now) {
+  const requested = Number(value);
+  if (!Number.isFinite(requested)) return null;
+  return Math.min(now + 4000, Math.max(now - MAX_TRACK_MS, Math.round(requested)));
 }
 
 function demoTimeline(bpm = 120) {
@@ -207,17 +217,21 @@ function applyOperatorCommand(entry, roomId, msg) {
     if (entry.state.timeline.length === 0) {
       entry.state.timeline = demoTimeline(entry.state.bpm);
     }
-    const requested = Number(msg.startedAtServerMs);
-    const minStart = now - 20 * 60 * 1000;
-    const maxStart = now + 4000;
-    entry.state.startedAtServerMs = Number.isFinite(requested)
-      ? Math.min(maxStart, Math.max(minStart, Math.round(requested)))
-      : now + PLAY_LEAD_MS;
+    entry.state.startedAtServerMs = clampAnchor(msg.startedAtServerMs, now) ?? now + PLAY_LEAD_MS;
     if (msg.bpm != null) entry.state.bpm = clampBpm(msg.bpm);
     entry.state.pattern = "timeline";
     entry.state.playing = true;
     broadcast(entry, statePayload(entry, roomId));
     return "playTrack";
+  }
+
+  if (msg.type === "reanchor") {
+    if (!entry.state.playing) return "ignored";
+    const anchored = clampAnchor(msg.startedAtServerMs, now);
+    if (anchored == null) return "ignored";
+    entry.state.startedAtServerMs = anchored;
+    broadcast(entry, statePayload(entry, roomId));
+    return "reanchor";
   }
 
   if (msg.type === "flash") {
@@ -236,6 +250,57 @@ function applyOperatorCommand(entry, roomId, msg) {
   }
 
   return "unknown";
+}
+
+function videoIdFrom(url) {
+  const videoId = url.searchParams.get("videoId") ?? "";
+  return isVideoId(videoId) ? videoId : "";
+}
+
+async function serveYouTubeInfo(res, url) {
+  const videoId = videoIdFrom(url);
+  if (!videoId) {
+    json(res, 400, { ok: false, error: "YouTube linki değil." });
+    return;
+  }
+  try {
+    const title = await fetchYouTubeTitle(videoId);
+    json(res, 200, { ok: true, videoId, title });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Video bulunamadı.";
+    json(res, 404, { ok: false, error: message });
+  }
+}
+
+async function serveYouTubeAudio(res, url) {
+  const videoId = videoIdFrom(url);
+  if (!videoId) {
+    json(res, 400, { ok: false, error: "YouTube linki değil." });
+    return;
+  }
+  try {
+    const audio = await loadYouTubeAudio(videoId);
+    if (res.destroyed) return;
+    res.writeHead(200, {
+      "content-type": audio.contentType,
+      "content-length": audio.size,
+      "cache-control": "private, max-age=1800",
+      "access-control-allow-origin": "*",
+    });
+    const stream = createReadStream(audio.filePath);
+    stream.on("error", () => {
+      if (!res.headersSent) {
+        json(res, 502, { ok: false, error: "Ses okunamadı." });
+        return;
+      }
+      res.destroy();
+    });
+    stream.pipe(res);
+  } catch (error) {
+    if (res.headersSent || res.destroyed) return;
+    const message = error instanceof Error ? error.message : "Ses indirilemedi.";
+    json(res, 502, { ok: false, error: message });
+  }
 }
 
 function json(res, status, body) {
@@ -277,6 +342,8 @@ const httpServer = createServer((req, res) => {
   }
 
   if (url.pathname === "/snapshot") {
+    const t0 = Number(url.searchParams.get("t0")) || 0;
+    const t1 = Date.now();
     const { id, room } = getRoom(url.searchParams.get("room") ?? DEFAULT_ROOM);
     const clientId = String(url.searchParams.get("clientId") ?? "").slice(0, 40);
     const isNew = Boolean(clientId) && !httpViewers.has(clientId);
@@ -296,7 +363,20 @@ const httpServer = createServer((req, res) => {
       audienceCount: audienceCount(room, id),
       serverNow: now,
       flashes: room.flashes,
+      t0,
+      t1,
+      t2: Date.now(),
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/youtube/info") {
+    void serveYouTubeInfo(res, url);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/youtube/audio") {
+    void serveYouTubeAudio(res, url);
     return;
   }
 
@@ -304,7 +384,7 @@ const httpServer = createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => {
       raw += chunk;
-      if (raw.length > 20_000) req.destroy();
+      if (raw.length > MAX_COMMAND_BYTES) req.destroy();
     });
     req.on("end", () => {
       let msg;
