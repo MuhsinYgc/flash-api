@@ -1,15 +1,20 @@
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import os from "node:os";
 import { WebSocketServer } from "ws";
 import { fetchYouTubeTitle, isVideoId, loadYouTubeAudio } from "./youtube-audio.mjs";
 
 const PORT = Number(process.env.SHOW_WS_PORT ?? 3202);
 const MIN_FLASH_GAP_MS = 334;
 const PLAY_LEAD_MS = 420;
-const FLASH_LEAD_MS = 280;
+const MANUAL_FLASH_LEAD_MS = 280;
 const DEFAULT_ROOM = "main";
 const MAX_TRACK_MS = 3 * 60 * 60 * 1000;
 const MAX_COMMAND_BYTES = 1_500_000;
+const OPERATOR_USER = process.env.SHOW_OPERATOR_USER || "istiklal_admin";
+const OPERATOR_PASS = process.env.SHOW_OPERATOR_PASS || "istiklal2024_dj";
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
 /** @typedef {"beat" | "pulse" | "hold" | "timeline"} Pattern */
 /** @typedef {{ atMs: number, onMs: number, color?: string }} TimelineCue */
@@ -95,14 +100,20 @@ function defaultState() {
     startedAtServerMs: null,
     bpm: 120,
     color: "#ffffff",
-    pattern: "beat",
-    timeline: demoTimeline(120),
+    pattern: "timeline",
+    timeline: [],
   };
   return state;
 }
 
 /** @type {Map<string, { lastSeen: number, roomId: string }>} */
 const httpViewers = new Map();
+
+/** @type {Map<string, { expires: number }>} */
+const operatorTokens = new Map();
+
+/** @type {Map<string, { count: number, windowStart: number }>} */
+const rateBuckets = new Map();
 
 /** @type {Map<string, { clients: Set<Client>, state: ShowState, lastFlashAt: number, flashes: { atServerMs: number, onMs: number, color: string }[] }>} */
 const rooms = new Map();
@@ -214,9 +225,6 @@ function applyOperatorCommand(entry, roomId, msg) {
     if (Array.isArray(msg.cues) && msg.cues.length > 0) {
       entry.state.timeline = sanitizeTimeline(msg.cues);
     }
-    if (entry.state.timeline.length === 0) {
-      entry.state.timeline = demoTimeline(entry.state.bpm);
-    }
     entry.state.startedAtServerMs = clampAnchor(msg.startedAtServerMs, now) ?? now + PLAY_LEAD_MS;
     if (msg.bpm != null) entry.state.bpm = clampBpm(msg.bpm);
     entry.state.pattern = "timeline";
@@ -240,7 +248,7 @@ function applyOperatorCommand(entry, roomId, msg) {
     const onMs = Math.min(400, Math.max(80, Number(msg.onMs) || 160));
     const flash = {
       type: "flash",
-      atServerMs: now + FLASH_LEAD_MS,
+      atServerMs: now + MANUAL_FLASH_LEAD_MS,
       onMs,
       color: entry.state.color,
     };
@@ -303,6 +311,86 @@ async function serveYouTubeAudio(res, url) {
   }
 }
 
+function ipScore(address) {
+  if (address.startsWith("192.168.")) return 30;
+  if (address.startsWith("10.")) return 20;
+  if (address.startsWith("172.")) return 10;
+  return 0;
+}
+
+function lanIpv4Addresses() {
+  /** @type {string[]} */
+  const out = [];
+  for (const iface of Object.values(os.networkInterfaces())) {
+    if (!iface) continue;
+    for (const addr of iface) {
+      if (addr.family !== "IPv4" || addr.internal) continue;
+      out.push(addr.address);
+    }
+  }
+  return [...new Set(out)].sort((a, b) => ipScore(b) - ipScore(a));
+}
+
+function networkHintPayload(port, proto) {
+  const safePort = /^\d{2,5}$/.test(port) ? port : "3200";
+  const scheme = proto === "http" ? "http" : "https";
+  const origins = lanIpv4Addresses().map((ip) => `${scheme}://${ip}:${safePort}`);
+  return {
+    ok: true,
+    origins,
+    recommended: origins[0] ?? "",
+  };
+}
+
+function clientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0].trim();
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+function rateLimit(ip, key, max, windowMs) {
+  const id = `${key}:${ip}`;
+  const now = Date.now();
+  const bucket = rateBuckets.get(id);
+  if (!bucket || now - bucket.windowStart > windowMs) {
+    rateBuckets.set(id, { count: 1, windowStart: now });
+    return true;
+  }
+  bucket.count += 1;
+  return bucket.count <= max;
+}
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+function credentialsOk(username, password) {
+  return safeEqual(username, OPERATOR_USER) && safeEqual(password, OPERATOR_PASS);
+}
+
+function pruneTokens(now = Date.now()) {
+  for (const [token, row] of operatorTokens) {
+    if (row.expires <= now) operatorTokens.delete(token);
+  }
+}
+
+function issueToken() {
+  pruneTokens();
+  const token = randomBytes(24).toString("hex");
+  operatorTokens.set(token, { expires: Date.now() + TOKEN_TTL_MS });
+  return token;
+}
+
+function tokenOk(token) {
+  if (typeof token !== "string" || !token) return false;
+  pruneTokens();
+  const row = operatorTokens.get(token);
+  return Boolean(row && row.expires > Date.now());
+}
+
 function json(res, status, body) {
   res.writeHead(status, {
     "content-type": "application/json",
@@ -330,6 +418,13 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === "/network-hint") {
+    const port = url.searchParams.get("port") ?? "3200";
+    const proto = url.searchParams.get("proto") ?? "https";
+    json(res, 200, networkHintPayload(port, proto));
+    return;
+  }
+
   if (url.pathname === "/sync") {
     const t1 = Date.now();
     json(res, 200, {
@@ -346,8 +441,9 @@ const httpServer = createServer((req, res) => {
     const t1 = Date.now();
     const { id, room } = getRoom(url.searchParams.get("room") ?? DEFAULT_ROOM);
     const clientId = String(url.searchParams.get("clientId") ?? "").slice(0, 40);
-    const isNew = Boolean(clientId) && !httpViewers.has(clientId);
-    if (clientId) {
+    const asOperator = url.searchParams.get("role") === "operator";
+    const isNew = Boolean(clientId) && !asOperator && !httpViewers.has(clientId);
+    if (clientId && !asOperator) {
       httpViewers.set(clientId, { lastSeen: Date.now(), roomId: id });
     }
     if (isNew) {
@@ -370,17 +466,58 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/login") {
+    const ip = clientIp(req);
+    if (!rateLimit(ip, "login", 8, 60_000)) {
+      json(res, 429, { ok: false, error: "Çok fazla deneme." });
+      return;
+    }
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+      if (raw.length > 4000) req.destroy();
+    });
+    req.on("end", () => {
+      let body;
+      try {
+        body = JSON.parse(raw || "{}");
+      } catch {
+        json(res, 400, { ok: false, error: "Invalid JSON" });
+        return;
+      }
+      if (!credentialsOk(body.username, body.password)) {
+        json(res, 401, { ok: false, error: "Kullanıcı adı veya şifre yanlış." });
+        return;
+      }
+      json(res, 200, { ok: true, token: issueToken() });
+    });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/youtube/info") {
+    if (!rateLimit(clientIp(req), "yt-info", 30, 60_000)) {
+      json(res, 429, { ok: false, error: "Çok fazla istek." });
+      return;
+    }
     void serveYouTubeInfo(res, url);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/youtube/audio") {
+    if (!rateLimit(clientIp(req), "yt-audio", 8, 60_000)) {
+      json(res, 429, { ok: false, error: "Çok fazla istek." });
+      return;
+    }
     void serveYouTubeAudio(res, url);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/command") {
+    const ip = clientIp(req);
+    if (!rateLimit(ip, "command", 40, 10_000)) {
+      json(res, 429, { ok: false, error: "Çok fazla komut." });
+      return;
+    }
     let raw = "";
     req.on("data", (chunk) => {
       raw += chunk;
@@ -392,6 +529,10 @@ const httpServer = createServer((req, res) => {
         msg = JSON.parse(raw || "{}");
       } catch {
         json(res, 400, { ok: false, error: "Invalid JSON" });
+        return;
+      }
+      if (!tokenOk(msg.token)) {
+        json(res, 401, { ok: false, error: "Operator girişi gerekli." });
         return;
       }
       const { id, room } = getRoom(msg.roomId ?? url.searchParams.get("room") ?? DEFAULT_ROOM);
@@ -435,6 +576,10 @@ wss.on("connection", (ws) => {
 
     if (msg.type === "hello") {
       const { id, room } = getRoom(msg.roomId);
+      if (msg.role === "operator" && !tokenOk(msg.token)) {
+        send(ws, { type: "error", message: "Operator girişi gerekli." });
+        return;
+      }
       if (joined) {
         const prev = rooms.get(client.roomId);
         prev?.clients.delete(client);

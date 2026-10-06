@@ -28,6 +28,10 @@ export function isVideoId(value) {
 function failureMessage(error) {
   const stderr = typeof error?.stderr === "string" ? error.stderr : "";
   const message = stderr || (error instanceof Error ? error.message : "");
+  const combined = `${message}\n${stderr}`;
+  if (/ENOENT/i.test(combined) || /spawn.*yt-dlp/i.test(combined)) {
+    return "yt-dlp bulunamadı. node_modules/youtube-dl-exec/bin içine kur.";
+  }
   const line = message
     .split("\n")
     .map((item) => item.trim())
@@ -77,7 +81,22 @@ function asAudio(file) {
   };
 }
 
+async function pruneAudioCache() {
+  const names = await readdir(cacheDir).catch(() => []);
+  const now = Date.now();
+  await Promise.all(
+    names.map(async (name) => {
+      const filePath = path.join(cacheDir, name);
+      const info = await stat(filePath).catch(() => null);
+      if (info && now - info.mtimeMs > CACHE_MS) {
+        await rm(filePath, { force: true });
+      }
+    }),
+  );
+}
+
 async function freshAudio(videoId) {
+  await pruneAudioCache();
   const cached = (await listFiles(videoId))[0];
   if (cached && Date.now() - cached.mtimeMs < CACHE_MS && cached.size <= MAX_BYTES) {
     return asAudio(cached);
