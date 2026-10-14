@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node show-server/server.mjs",
     "dev:show": "node show-server/server.mjs",
-    "dev:all": "node show-server/server.mjs"
+    "dev:all": "node show-server/server.mjs",
+    "postinstall": "node scripts/ensure-yt-dlp.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0",

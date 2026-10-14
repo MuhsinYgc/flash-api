@@ -30,7 +30,10 @@ function failureMessage(error) {
   const message = stderr || (error instanceof Error ? error.message : "");
   const combined = `${message}\n${stderr}`;
   if (/ENOENT/i.test(combined) || /spawn.*yt-dlp/i.test(combined)) {
-    return "yt-dlp bulunamadı. node_modules/youtube-dl-exec/bin içine kur.";
+    return "yt-dlp bulunamadı. flash-api içinde npm install çalıştır.";
+  }
+  if (/unsupported version of Python/i.test(combined)) {
+    return "yt-dlp için Python 3.10+ gerekir. macOS/Linux’ta flash-api dizininde npm install (standalone binary) veya brew install python@3.12.";
   }
   const line = message
     .split("\n")
