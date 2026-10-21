@@ -12,6 +12,12 @@ primary_region = "ams"
   auto_start_machines = true
   min_machines_running = 1
 
+  # Every phone holds a WebSocket open. Fly's default (hard_limit 25) would queue the rest.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 2000
+    hard_limit = 2500
+
   [[http_service.checks]]
     grace_period = "30s"
     interval = "15s"
