@@ -413,6 +413,11 @@ const httpServer = createServer((req, res) => {
     return;
   }
 
+  if (url.pathname === "/" && req.method === "GET") {
+    json(res, 200, { ok: true, service: "show-ws", time: new Date().toISOString() });
+    return;
+  }
+
   if (url.pathname === "/health") {
     json(res, 200, { ok: true, service: "show-ws", time: new Date().toISOString() });
     return;
