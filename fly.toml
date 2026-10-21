@@ -25,7 +25,7 @@ primary_region = "ams"
     timeout = "5s"
     path = "/health"
 
+# Maç günü ~1000 telefon için. Maç sonrası maliyet için: shared-cpu-1x + 512mb
 [[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
-  cpus = 1
+  size = "performance-1x"
+  memory = "2048mb"
