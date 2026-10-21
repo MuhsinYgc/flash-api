@@ -7,6 +7,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
+# Standalone yt-dlp binary is installed in ensure-yt-dlp.mjs; skip Python preinstall check.
+ENV YOUTUBE_DL_SKIP_PYTHON_CHECK=1
 RUN npm ci --omit=dev
 
 COPY scripts ./scripts
