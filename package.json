@@ -6,7 +6,8 @@
     "dev": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
     "dev:show": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
     "dev:all": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
-    "ensure-yt-dlp": "node scripts/ensure-yt-dlp.mjs"
+    "ensure-yt-dlp": "node scripts/ensure-yt-dlp.mjs",
+    "load-test": "node scripts/load-test.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0",

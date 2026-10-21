@@ -115,14 +115,35 @@ const operatorTokens = new Map();
 /** @type {Map<string, { count: number, windowStart: number }>} */
 const rateBuckets = new Map();
 
-/** @type {Map<string, { clients: Set<Client>, state: ShowState, lastFlashAt: number, flashes: { atServerMs: number, onMs: number, color: string }[] }>} */
+/**
+ * @typedef {{
+ *   clients: Set<Client>,
+ *   state: ShowState,
+ *   version: number,
+ *   lastFlashAt: number,
+ *   flashes: { atServerMs: number, onMs: number, color: string }[],
+ *   countTimer: NodeJS.Timeout | null,
+ * }} Room
+ */
+
+/** @type {Map<string, Room>} */
 const rooms = new Map();
+
+const COUNT_UPDATE_MS = 1000;
+const HEARTBEAT_MS = 30_000;
 
 function getRoom(roomId) {
   const id = sanitizeRoomId(roomId);
   let room = rooms.get(id);
   if (!room) {
-    room = { clients: new Set(), state: defaultState(), lastFlashAt: 0, flashes: [] };
+    room = {
+      clients: new Set(),
+      state: defaultState(),
+      version: 1,
+      lastFlashAt: 0,
+      flashes: [],
+      countTimer: null,
+    };
     rooms.set(id, room);
   }
   return { id, room };
@@ -163,10 +184,29 @@ function statePayload(room, roomId, extra = {}) {
   return {
     type: "state",
     state: room.state,
+    version: room.version,
     audienceCount: audienceCount(room, roomId),
     serverNow: Date.now(),
     ...extra,
   };
+}
+
+/** Show changed: every client needs the new state. */
+function broadcastState(room, roomId) {
+  room.version += 1;
+  broadcast(room, statePayload(room, roomId));
+}
+
+/** Only operators display the audience count; coalesce join/leave churn. */
+function scheduleCountUpdate(room, roomId) {
+  if (room.countTimer) return;
+  room.countTimer = setTimeout(() => {
+    room.countTimer = null;
+    const raw = JSON.stringify(statePayload(room, roomId));
+    for (const client of room.clients) {
+      if (client.role === "operator" && client.ws.readyState === 1) client.ws.send(raw);
+    }
+  }, COUNT_UPDATE_MS);
 }
 
 function applyOperatorCommand(entry, roomId, msg) {
@@ -178,26 +218,26 @@ function applyOperatorCommand(entry, roomId, msg) {
     if (entry.state.pattern === "timeline" && entry.state.timeline.length === 0) {
       entry.state.timeline = demoTimeline(entry.state.bpm);
     }
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "play";
   }
 
   if (msg.type === "stop") {
     entry.state.playing = false;
     entry.state.startedAtServerMs = null;
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "stop";
   }
 
   if (msg.type === "setBpm") {
     entry.state.bpm = clampBpm(msg.bpm);
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "setBpm";
   }
 
   if (msg.type === "setColor") {
     entry.state.color = sanitizeColor(msg.color);
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "setColor";
   }
 
@@ -208,7 +248,7 @@ function applyOperatorCommand(entry, roomId, msg) {
       if (next === "timeline" && entry.state.timeline.length === 0) {
         entry.state.timeline = demoTimeline(entry.state.bpm);
       }
-      broadcast(entry, statePayload(entry, roomId));
+      broadcastState(entry, roomId);
       return "setPattern";
     }
     return "ignored";
@@ -217,7 +257,7 @@ function applyOperatorCommand(entry, roomId, msg) {
   if (msg.type === "setTimeline") {
     entry.state.timeline = sanitizeTimeline(msg.cues);
     entry.state.pattern = "timeline";
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "setTimeline";
   }
 
@@ -229,7 +269,7 @@ function applyOperatorCommand(entry, roomId, msg) {
     if (msg.bpm != null) entry.state.bpm = clampBpm(msg.bpm);
     entry.state.pattern = "timeline";
     entry.state.playing = true;
-    broadcast(entry, statePayload(entry, roomId));
+    broadcastState(entry, roomId);
     return "playTrack";
   }
 
@@ -238,7 +278,13 @@ function applyOperatorCommand(entry, roomId, msg) {
     const anchored = clampAnchor(msg.startedAtServerMs, now);
     if (anchored == null) return "ignored";
     entry.state.startedAtServerMs = anchored;
-    broadcast(entry, statePayload(entry, roomId));
+    entry.version += 1;
+    broadcast(entry, {
+      type: "anchor",
+      startedAtServerMs: anchored,
+      version: entry.version,
+      serverNow: now,
+    });
     return "reanchor";
   }
 
@@ -447,12 +493,13 @@ const httpServer = createServer((req, res) => {
     const { id, room } = getRoom(url.searchParams.get("room") ?? DEFAULT_ROOM);
     const clientId = String(url.searchParams.get("clientId") ?? "").slice(0, 40);
     const asOperator = url.searchParams.get("role") === "operator";
-    const isNew = Boolean(clientId) && !asOperator && !httpViewers.has(clientId);
-    if (clientId && !asOperator) {
+    // WS clients poll only as a backup; counting them here would double the audience.
+    const viaWs = url.searchParams.get("ws") === "1";
+    const knownVersion = Number(url.searchParams.get("v")) || 0;
+    if (clientId && !asOperator && !viaWs) {
+      const isNew = !httpViewers.has(clientId);
       httpViewers.set(clientId, { lastSeen: Date.now(), roomId: id });
-    }
-    if (isNew) {
-      broadcast(room, statePayload(room, id));
+      if (isNew) scheduleCountUpdate(room, id);
     }
     const now = Date.now();
     room.flashes = room.flashes.filter((flash) => flash.atServerMs + flash.onMs > now - 250);
@@ -460,7 +507,8 @@ const httpServer = createServer((req, res) => {
       type: "state",
       clientId,
       roomId: id,
-      state: room.state,
+      version: room.version,
+      state: knownVersion === room.version ? null : room.state,
       audienceCount: audienceCount(room, id),
       serverNow: now,
       flashes: room.flashes,
@@ -588,7 +636,7 @@ wss.on("connection", (ws) => {
       if (joined) {
         const prev = rooms.get(client.roomId);
         prev?.clients.delete(client);
-        if (prev) broadcast(prev, statePayload(prev, client.roomId));
+        if (prev) scheduleCountUpdate(prev, client.roomId);
       }
       client.role = msg.role === "operator" ? "operator" : "audience";
       client.roomId = id;
@@ -600,9 +648,10 @@ wss.on("connection", (ws) => {
         roomId: id,
         serverNow: Date.now(),
         state: room.state,
+        version: room.version,
         audienceCount: audienceCount(room, id),
       });
-      broadcast(room, statePayload(room, id), client.id);
+      scheduleCountUpdate(room, id);
       return;
     }
 
@@ -642,12 +691,32 @@ wss.on("connection", (ws) => {
     const entry = rooms.get(client.roomId);
     if (!entry) return;
     entry.clients.delete(client);
-    broadcast(entry, statePayload(entry, client.roomId));
     if (entry.clients.size === 0 && client.roomId !== DEFAULT_ROOM) {
+      if (entry.countTimer) clearTimeout(entry.countTimer);
       rooms.delete(client.roomId);
+      return;
     }
+    scheduleCountUpdate(entry, client.roomId);
+  });
+
+  ws.isAlive = true;
+  ws.on("pong", () => {
+    ws.isAlive = true;
   });
 });
+
+// Phones that lose signal often never send a close frame; drop them so they stop costing fan-out.
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, HEARTBEAT_MS);
+wss.on("close", () => clearInterval(heartbeat));
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`show-ws listening on ws://0.0.0.0:${PORT}`);
