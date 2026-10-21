@@ -614,6 +614,22 @@ wss.on("connection", (ws) => {
     const entry = rooms.get(client.roomId);
     if (!entry) return;
 
+    if (msg.type === "syncFlashReport" && client.role === "audience") {
+      const payload = {
+        type: "torchHit",
+        clientId: client.id,
+        platform: String(msg.platform ?? "other").slice(0, 16),
+        showMs: Number(msg.showMs) || 0,
+        cueIndex: msg.cueIndex == null ? null : Number(msg.cueIndex),
+        seq: Number(msg.seq) || 0,
+        serverNow: Date.now(),
+      };
+      for (const peer of entry.clients) {
+        if (peer.role === "operator") send(peer.ws, payload);
+      }
+      return;
+    }
+
     if (client.role !== "operator") {
       send(ws, { type: "error", message: "Operator only." });
       return;
