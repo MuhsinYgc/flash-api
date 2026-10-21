@@ -130,7 +130,8 @@ const rateBuckets = new Map();
 const rooms = new Map();
 
 const COUNT_UPDATE_MS = 1000;
-const HEARTBEAT_MS = 30_000;
+const HEARTBEAT_MS = 45_000;
+const BROADCAST_CHUNK = 48;
 
 function getRoom(roomId) {
   const id = sanitizeRoomId(roomId);
@@ -174,10 +175,20 @@ function send(ws, payload) {
 
 function broadcast(room, payload, except) {
   const raw = JSON.stringify(payload);
+  /** @type {import("ws").WebSocket[]} */
+  const targets = [];
   for (const client of room.clients) {
     if (except && client.id === except) continue;
-    if (client.ws.readyState === 1) client.ws.send(raw);
+    if (client.ws.readyState === 1) targets.push(client.ws);
   }
+  if (targets.length === 0) return;
+  let index = 0;
+  const sendChunk = () => {
+    const end = Math.min(index + BROADCAST_CHUNK, targets.length);
+    for (; index < end; index += 1) targets[index].send(raw);
+    if (index < targets.length) setImmediate(sendChunk);
+  };
+  sendChunk();
 }
 
 function statePayload(room, roomId, extra = {}) {
@@ -700,8 +711,10 @@ wss.on("connection", (ws) => {
   });
 
   ws.isAlive = true;
+  ws.missedHeartbeats = 0;
   ws.on("pong", () => {
     ws.isAlive = true;
+    ws.missedHeartbeats = 0;
   });
 });
 
@@ -709,8 +722,13 @@ wss.on("connection", (ws) => {
 const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
     if (ws.isAlive === false) {
-      ws.terminate();
-      continue;
+      ws.missedHeartbeats = (ws.missedHeartbeats ?? 0) + 1;
+      if (ws.missedHeartbeats >= 2) {
+        ws.terminate();
+        continue;
+      }
+    } else {
+      ws.missedHeartbeats = 0;
     }
     ws.isAlive = false;
     ws.ping();
