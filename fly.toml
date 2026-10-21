@@ -1,5 +1,5 @@
 # App name is set on first `fly launch` (or rename `app` below).
-app = "flash-api"
+app = "flash-api-dkiqeq"
 primary_region = "ams"
 
 [build]

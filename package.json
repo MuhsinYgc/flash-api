@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node show-server/server.mjs",
-    "dev:show": "node show-server/server.mjs",
-    "dev:all": "node show-server/server.mjs",
-    "postinstall": "node scripts/ensure-yt-dlp.mjs"
+    "dev": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
+    "dev:show": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
+    "dev:all": "node scripts/ensure-yt-dlp.mjs && node show-server/server.mjs",
+    "ensure-yt-dlp": "node scripts/ensure-yt-dlp.mjs"
   },
   "dependencies": {
     "ws": "^8.22.0",
