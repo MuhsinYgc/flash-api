@@ -5,7 +5,7 @@ import os from "node:os";
 import { WebSocketServer } from "ws";
 import { fetchYouTubeTitle, isVideoId, loadYouTubeAudio } from "./youtube-audio.mjs";
 
-const PORT = Number(process.env.SHOW_WS_PORT ?? 3202);
+const PORT = Number(process.env.SHOW_WS_PORT ?? process.env.PORT ?? 3202);
 const MIN_FLASH_GAP_MS = 334;
 const PLAY_LEAD_MS = 420;
 const MANUAL_FLASH_LEAD_MS = 280;

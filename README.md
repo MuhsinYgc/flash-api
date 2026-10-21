@@ -6,6 +6,19 @@ Show sync server for `../flah-web`. Timeline, clock sync, YouTube audio analysis
 npm run dev
 ```
 
+## Fly.io
+
+Repo includes `Dockerfile` and `fly.toml`. From this directory:
+
+```bash
+fly auth login
+fly launch --no-deploy   # if app name flash-api is taken, pick another and edit fly.toml
+fly secrets set SHOW_WS_PORT=8080 SHOW_OPERATOR_USER=... SHOW_OPERATOR_PASS=...
+fly deploy
+```
+
+Health: `https://<app-name>.fly.dev/health`
+
 - HTTP: `http://localhost:3202` (`/snapshot`, `/sync`, `/command`, `/login`, `/youtube/*`)
 - WebSocket: `ws://localhost:3202`
 
