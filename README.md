@@ -19,6 +19,8 @@ fly deploy
 
 Health: `https://<app-name>.fly.dev/health`
 
+**Scale:** keep **1 machine** only (`fly scale count 1 -a <app-name>`). Multiple machines split WebSocket rooms; phones miss flashes.
+
 - HTTP: `http://localhost:3202` (`/snapshot`, `/sync`, `/command`, `/login`, `/youtube/*`)
 - WebSocket: `ws://localhost:3202`
 

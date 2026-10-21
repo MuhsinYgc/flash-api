@@ -1,4 +1,5 @@
 # App name is set on first `fly launch` (or rename `app` below).
+# Show state is in-memory: run exactly ONE machine (`fly scale count 1 -a flash-api-dkiqeq`).
 app = "flash-api-dkiqeq"
 primary_region = "ams"
 
